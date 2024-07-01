@@ -5,12 +5,15 @@ import json
 import logging
 from enum import auto
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.schema import BaseNode, MetadataMode, TextNode
-
 from llama_index.core.vector_stores.types import (
-    ExactMatchFilter,
     BasePydanticVectorStore,
+    ExactMatchFilter,
     MetadataFilters,
     VectorStoreQuery,
     VectorStoreQueryMode,
@@ -21,9 +24,6 @@ from llama_index.core.vector_stores.utils import (
     metadata_dict_to_node,
     node_to_metadata_dict,
 )
-
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents import SearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,8 @@ class IndexManagement(int, enum.Enum):
 
 
 class AzureAISearchVectorStore(BasePydanticVectorStore):
-    """Azure AI Search vector store.
+    """
+    Azure AI Search vector store.
 
     Examples:
         `pip install llama-index-vector-stores-azureaisearch`
@@ -495,42 +496,58 @@ class AzureAISearchVectorStore(BasePydanticVectorStore):
         nodes: List[BaseNode],
         **add_kwargs: Any,
     ) -> List[str]:
-        """Add nodes to index associated with the configured search client.
+        """
+        Add nodes to index associated with the configured search client.
 
         Args:
             nodes: List[BaseNode]: nodes with embeddings
 
         """
+        from azure.search.documents import IndexDocumentsBatch
+
         if not self._search_client:
             raise ValueError("Search client not initialized")
 
+        accumulator = IndexDocumentsBatch()
         documents = []
+
         ids = []
+        accumulated_size = 0
+        max_size = 16 * 1024 * 1024  # 16MB in bytes
+        max_docs = 1000
 
         for node in nodes:
             logger.debug(f"Processing embedding: {node.node_id}")
             ids.append(node.node_id)
 
             index_document = self._create_index_document(node)
-
+            document_size = len(
+                str(node.get_content(metadata_mode=MetadataMode.NONE)).encode("utf-8")
+            )
             documents.append(index_document)
+            accumulated_size += document_size
 
-            if len(documents) >= 10:
+            accumulator.add_upload_actions(index_document)
+
+            if len(documents) >= max_docs or accumulated_size >= max_size:
                 logger.info(
                     f"Uploading batch of size {len(documents)}, "
-                    f"current progress {len(ids)} of {len(nodes)}"
+                    f"current progress {len(ids)} of {len(nodes)}, "
+                    f"accumulated size {accumulated_size / (1024 * 1024):.2f} MB"
                 )
-                self._search_client.merge_or_upload_documents(documents)
+                self._search_client.index_documents(accumulator)
+                accumulator.dequeue_actions()
                 documents = []
+                accumulated_size = 0
 
-        # Upload remaining batch of less than 10 documents
-        if len(documents) > 0:
+        # Upload remaining batch
+        if documents:
             logger.info(
                 f"Uploading remaining batch of size {len(documents)}, "
-                f"current progress {len(ids)} of {len(nodes)}"
+                f"current progress {len(ids)} of {len(nodes)}, "
+                f"accumulated size {accumulated_size / (1024 * 1024):.2f} MB"
             )
-            self._search_client.merge_or_upload_documents(documents)
-            documents = []
+            self._search_client.index_documents(accumulator)
 
         return ids
 
@@ -597,7 +614,7 @@ class AzureAISearchVectorStore(BasePydanticVectorStore):
             index_field = metadata_mapping[0]
 
             if len(odata_filter) > 0:
-                odata_filter.append(" {metadata_filters.condition.value} ")
+                odata_filter.append(f" {metadata_filters.condition.value} ")
             if isinstance(f.value, str):
                 escaped_value = "".join([("''" if s == "'" else s) for s in f.value])
                 odata_filter.append(f"{index_field} eq '{escaped_value}'")
@@ -678,7 +695,8 @@ class AzureQueryResultSearchBase:
         score_result = []
         for result in results:
             node_id = result[self._field_mapping["id"]]
-            metadata = json.loads(result[self._field_mapping["metadata"]])
+            metadata_str = result[self._field_mapping["metadata"]]
+            metadata = json.loads(metadata_str) if metadata_str else {}
             score = result["@search.score"]
             chunk = result[self._field_mapping["chunk"]]
 
@@ -795,7 +813,8 @@ class AzureQueryResultSearchSemanticHybrid(AzureQueryResultSearchHybrid):
         score_result = []
         for result in results:
             node_id = result[self._field_mapping["id"]]
-            metadata = json.loads(result[self._field_mapping["metadata"]])
+            metadata_str = result[self._field_mapping["metadata"]]
+            metadata = json.loads(metadata_str) if metadata_str else {}
             # use reranker_score instead of score
             score = result["@search.reranker_score"]
             chunk = result[self._field_mapping["chunk"]]

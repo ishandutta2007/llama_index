@@ -12,7 +12,7 @@ from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import BasePromptTemplate
 from llama_index.core.prompts.default_prompts import RANKGPT_RERANK_PROMPT
 from llama_index.core.prompts.mixin import PromptDictType
-from llama_index.core.schema import NodeWithScore, QueryBundle
+from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle
 from llama_index.core.utils import print_text
 
 logger = logging.getLogger(__name__)
@@ -68,8 +68,7 @@ class RankGPTRerank(BaseNodePostprocessor):
         nodes: List[NodeWithScore],
         query_bundle: Optional[QueryBundle] = None,
     ) -> List[NodeWithScore]:
-        dispatch_event = dispatcher.get_dispatch_event()
-        dispatch_event(
+        dispatcher.event(
             ReRankStartEvent(
                 query=query_bundle,
                 nodes=nodes,
@@ -83,7 +82,10 @@ class RankGPTRerank(BaseNodePostprocessor):
 
         items = {
             "query": query_bundle.query_str,
-            "hits": [{"content": node.get_content()} for node in nodes],
+            "hits": [
+                {"content": node.get_content(metadata_mode=MetadataMode.EMBED)}
+                for node in nodes
+            ],
         }
 
         messages = self.create_permutation_instruction(item=items)
@@ -102,10 +104,10 @@ class RankGPTRerank(BaseNodePostprocessor):
                     NodeWithScore(node=nodes[idx].node, score=nodes[idx].score)
                 )
 
-            dispatch_event(ReRankEndEvent(nodes=initial_results[: self.top_n]))
+            dispatcher.event(ReRankEndEvent(nodes=initial_results[: self.top_n]))
             return initial_results[: self.top_n]
         else:
-            dispatch_event(ReRankEndEvent(nodes=nodes[: self.top_n]))
+            dispatcher.event(ReRankEndEvent(nodes=nodes[: self.top_n]))
             return nodes[: self.top_n]
 
     def _get_prompts(self) -> PromptDictType:

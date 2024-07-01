@@ -56,6 +56,7 @@ import_err_msg = (
 DENSE_VECTOR_NAME = "text-dense"
 SPARSE_VECTOR_NAME_OLD = "text-sparse"
 SPARSE_VECTOR_NAME = "text-sparse-new"
+DOCUMENT_ID_KEY = "doc_id"
 
 
 class QdrantVectorStore(BasePydanticVectorStore):
@@ -82,6 +83,7 @@ class QdrantVectorStore(BasePydanticVectorStore):
         sparse_doc_fn (Optional[SparseEncoderCallable]): function to encode sparse vectors
         sparse_query_fn (Optional[SparseEncoderCallable]): function to encode sparse queries
         hybrid_fusion_fn (Optional[HybridFusionCallable]): function to fuse hybrid search results
+        index_doc_id (bool): whether to create a payload index for the document ID. Defaults to True
 
     Examples:
         `pip install llama-index-vector-stores-qdrant`
@@ -102,7 +104,6 @@ class QdrantVectorStore(BasePydanticVectorStore):
     flat_metadata: bool = False
 
     collection_name: str
-    path: Optional[str]
     url: Optional[str]
     api_key: Optional[str]
     batch_size: int
@@ -110,9 +111,10 @@ class QdrantVectorStore(BasePydanticVectorStore):
     max_retries: int
     client_kwargs: dict = Field(default_factory=dict)
     enable_hybrid: bool
+    index_doc_id: bool
 
-    _client: Any = PrivateAttr()
-    _aclient: Any = PrivateAttr()
+    _client: qdrant_client.QdrantClient = PrivateAttr()
+    _aclient: qdrant_client.AsyncQdrantClient = PrivateAttr()
     _collection_initialized: bool = PrivateAttr()
     _sparse_doc_fn: Optional[SparseEncoderCallable] = PrivateAttr()
     _sparse_query_fn: Optional[SparseEncoderCallable] = PrivateAttr()
@@ -133,6 +135,7 @@ class QdrantVectorStore(BasePydanticVectorStore):
         sparse_doc_fn: Optional[SparseEncoderCallable] = None,
         sparse_query_fn: Optional[SparseEncoderCallable] = None,
         hybrid_fusion_fn: Optional[HybridFusionCallable] = None,
+        index_doc_id: bool = True,
         **kwargs: Any,
     ) -> None:
         """Init params."""
@@ -191,6 +194,7 @@ class QdrantVectorStore(BasePydanticVectorStore):
             max_retries=max_retries,
             client_kwargs=client_kwargs or {},
             enable_hybrid=enable_hybrid,
+            index_doc_id=index_doc_id,
         )
 
     @classmethod
@@ -273,6 +277,95 @@ class QdrantVectorStore(BasePydanticVectorStore):
 
         return points, ids
 
+    def get_nodes(
+        self,
+        node_ids: Optional[List[str]] = None,
+        filters: Optional[MetadataFilters] = None,
+    ) -> List[BaseNode]:
+        """
+        Get nodes from the index.
+
+        Args:
+            node_ids (Optional[List[str]]): List of node IDs to retrieve.
+            filters (Optional[MetadataFilters]): Metadata filters to apply.
+
+        Returns:
+            List[BaseNode]: List of nodes retrieved from the index.
+        """
+        should = []
+        if node_ids is not None:
+            should = [
+                HasIdCondition(
+                    has_id=node_ids,
+                )
+            ]
+
+        if filters is not None:
+            filter = self._build_subfilter(filters)
+            if filter.should is None:
+                filter.should = should
+            else:
+                filter.should.extend(should)
+        else:
+            filter = Filter(should=should)
+
+        # If we pass an empty list, Qdrant will not return any results
+        filter.must = filter.must if filter.must and len(filter.must) > 0 else None
+        filter.should = (
+            filter.should if filter.should and len(filter.should) > 0 else None
+        )
+        filter.must_not = (
+            filter.must_not if filter.must_not and len(filter.must_not) > 0 else None
+        )
+
+        response = self._client.scroll(
+            collection_name=self.collection_name,
+            limit=9999,
+            scroll_filter=filter,
+        )
+
+        return self.parse_to_query_result(response[0]).nodes
+
+    async def aget_nodes(
+        self,
+        node_ids: Optional[List[str]] = None,
+        filters: Optional[MetadataFilters] = None,
+    ) -> List[BaseNode]:
+        """
+        Asynchronous method to get nodes from the index.
+
+        Args:
+            node_ids (Optional[List[str]]): List of node IDs to retrieve.
+            filters (Optional[MetadataFilters]): Metadata filters to apply.
+
+        Returns:
+            List[BaseNode]: List of nodes retrieved from the index.
+        """
+        should = []
+        if node_ids is not None:
+            should = [
+                HasIdCondition(
+                    has_id=node_ids,
+                )
+            ]
+
+        if filters is not None:
+            filter = self._build_subfilter(filters)
+            if filter.should is None:
+                filter.should = should
+            else:
+                filter.should.extend(should)
+        else:
+            filter = Filter(should=should)
+
+        response = await self._aclient.scroll(
+            collection_name=self.collection_name,
+            limit=9999,
+            scroll_filter=filter,
+        )
+
+        return self.parse_to_query_result(response[0]).nodes
+
     def add(self, nodes: List[BaseNode], **add_kwargs: Any) -> List[str]:
         """
         Add nodes to index.
@@ -349,7 +442,7 @@ class QdrantVectorStore(BasePydanticVectorStore):
             points_selector=rest.Filter(
                 must=[
                     rest.FieldCondition(
-                        key="doc_id", match=rest.MatchValue(value=ref_doc_id)
+                        key=DOCUMENT_ID_KEY, match=rest.MatchValue(value=ref_doc_id)
                     )
                 ]
             ),
@@ -368,11 +461,95 @@ class QdrantVectorStore(BasePydanticVectorStore):
             points_selector=rest.Filter(
                 must=[
                     rest.FieldCondition(
-                        key="doc_id", match=rest.MatchValue(value=ref_doc_id)
+                        key=DOCUMENT_ID_KEY, match=rest.MatchValue(value=ref_doc_id)
                     )
                 ]
             ),
         )
+
+    def delete_nodes(
+        self,
+        node_ids: Optional[List[str]] = None,
+        filters: Optional[MetadataFilters] = None,
+        **delete_kwargs: Any,
+    ) -> None:
+        """
+        Delete nodes using with node_ids.
+
+        Args:
+            node_ids (Optional[List[str]): List of node IDs to delete.
+            filters (Optional[MetadataFilters]): Metadata filters to apply.
+        """
+        should = []
+        if node_ids is not None:
+            should = [
+                HasIdCondition(
+                    has_id=node_ids,
+                )
+            ]
+
+        if filters is not None:
+            filter = self._build_subfilter(filters)
+            if filter.should is None:
+                filter.should = should
+            else:
+                filter.should.extend(should)
+        else:
+            filter = Filter(should=should)
+
+        self._client.delete(
+            collection_name=self.collection_name,
+            points_selector=filter,
+        )
+
+    async def adelete_nodes(
+        self,
+        node_ids: Optional[List[str]] = None,
+        filters: Optional[MetadataFilters] = None,
+        **delete_kwargs: Any,
+    ) -> None:
+        """
+        Asynchronous method to delete nodes using with node_ids.
+
+        Args:
+            node_ids (Optional[List[str]): List of node IDs to delete.
+            filters (Optional[MetadataFilters]): Metadata filters to apply.
+        """
+        should = []
+        if node_ids is not None:
+            should = [
+                HasIdCondition(
+                    has_id=node_ids,
+                )
+            ]
+
+        if filters is not None:
+            filter = self._build_subfilter(filters)
+            if filter.should is None:
+                filter.should = should
+            else:
+                filter.should.extend(should)
+        else:
+            filter = Filter(should=should)
+
+        await self._aclient.delete(
+            collection_name=self.collection_name,
+            points_selector=filter,
+        )
+
+    def clear(self) -> None:
+        """
+        Clear the index.
+        """
+        self._client.delete_collection(collection_name=self.collection_name)
+        self._collection_initialized = False
+
+    async def aclear(self) -> None:
+        """
+        Asynchronous method to clear the index.
+        """
+        await self._aclient.delete_collection(collection_name=self.collection_name)
+        self._collection_initialized = False
 
     @property
     def client(self) -> Any:
@@ -408,6 +585,16 @@ class QdrantVectorStore(BasePydanticVectorStore):
                         size=vector_size,
                         distance=rest.Distance.COSINE,
                     ),
+                )
+
+            # To improve search performance Qdrant recommends setting up
+            # a payload index for fields used in filters.
+            # https://qdrant.tech/documentation/concepts/indexing
+            if self.index_doc_id:
+                self._client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=DOCUMENT_ID_KEY,
+                    field_schema=rest.PayloadSchemaType.KEYWORD,
                 )
         except (RpcError, ValueError, UnexpectedResponse) as exc:
             if "already exists" not in str(exc):
@@ -446,6 +633,15 @@ class QdrantVectorStore(BasePydanticVectorStore):
                         size=vector_size,
                         distance=rest.Distance.COSINE,
                     ),
+                )
+            # To improve search performance Qdrant recommends setting up
+            # a payload index for fields used in filters.
+            # https://qdrant.tech/documentation/concepts/indexing
+            if self.index_doc_id:
+                await self._aclient.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=DOCUMENT_ID_KEY,
+                    field_schema=rest.PayloadSchemaType.KEYWORD,
                 )
         except (RpcError, ValueError, UnexpectedResponse) as exc:
             if "already exists" not in str(exc):
@@ -766,8 +962,12 @@ class QdrantVectorStore(BasePydanticVectorStore):
                     relationships=relationships,
                 )
             nodes.append(node)
-            similarities.append(point.score)
             ids.append(str(point.id))
+            try:
+                similarities.append(point.score)
+            except AttributeError:
+                # certain requests do not return a score
+                similarities.append(1.0)
 
         return VectorStoreQueryResult(nodes=nodes, similarities=similarities, ids=ids)
 
@@ -868,7 +1068,7 @@ class QdrantVectorStore(BasePydanticVectorStore):
         if query.doc_ids:
             must_conditions.append(
                 FieldCondition(
-                    key="doc_id",
+                    key=DOCUMENT_ID_KEY,
                     match=MatchAny(any=query.doc_ids),
                 )
             )

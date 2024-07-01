@@ -1,7 +1,6 @@
-from threading import Thread
+import asyncio
 from typing import Any, List, Optional, Tuple
 
-from llama_index.core.async_utils import asyncio_run
 from llama_index.core.base.base_retriever import BaseRetriever
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.callbacks import CallbackManager, trace_method
@@ -21,6 +20,7 @@ from llama_index.core.settings import (
     callback_manager_from_settings_or_context,
     llm_from_settings_or_context,
 )
+from llama_index.core.types import Thread
 
 DEFAULT_CONTEXT_TEMPLATE = (
     "Context information is below."
@@ -31,7 +31,8 @@ DEFAULT_CONTEXT_TEMPLATE = (
 
 
 class ContextChatEngine(BaseChatEngine):
-    """Context Chat Engine.
+    """
+    Context Chat Engine.
 
     Uses a retriever to retrieve a context, set the context in the system prompt,
     and then uses an LLM to generate a response, for a fluid chat experience.
@@ -291,11 +292,7 @@ class ContextChatEngine(BaseChatEngine):
             ],
             source_nodes=nodes,
         )
-        thread = Thread(
-            target=lambda x: asyncio_run(chat_response.awrite_response_to_history(x)),
-            args=(self._memory,),
-        )
-        thread.start()
+        asyncio.create_task(chat_response.awrite_response_to_history(self._memory))
 
         return chat_response
 

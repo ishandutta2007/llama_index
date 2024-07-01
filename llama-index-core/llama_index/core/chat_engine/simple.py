@@ -1,7 +1,6 @@
-from threading import Thread
+import asyncio
 from typing import Any, List, Optional, Type
 
-from llama_index.core.async_utils import asyncio_run
 from llama_index.core.base.llms.types import ChatMessage
 from llama_index.core.callbacks import CallbackManager, trace_method
 from llama_index.core.chat_engine.types import (
@@ -17,10 +16,12 @@ from llama_index.core.settings import (
     callback_manager_from_settings_or_context,
     llm_from_settings_or_context,
 )
+from llama_index.core.types import Thread
 
 
 class SimpleChatEngine(BaseChatEngine):
-    """Simple Chat Engine.
+    """
+    Simple Chat Engine.
 
     Have a conversation with the LLM.
     This does not make use of a knowledge base.
@@ -166,11 +167,7 @@ class SimpleChatEngine(BaseChatEngine):
         chat_response = StreamingAgentChatResponse(
             achat_stream=await self._llm.astream_chat(all_messages)
         )
-        thread = Thread(
-            target=lambda x: asyncio_run(chat_response.awrite_response_to_history(x)),
-            args=(self._memory,),
-        )
-        thread.start()
+        asyncio.create_task(chat_response.awrite_response_to_history(self._memory))
 
         return chat_response
 
